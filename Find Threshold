@@ -1,18 +1,33 @@
 #include <Arduino.h>
 
-const int touchPin = T0; // GPIO pin with capacitive touch capability (change to your specific pin)
-int touchValue = 0;
+const int touchPin = T0; // Capacitive touch pin (T0 corresponds to GPIO 4 on some boards)
+const int numSamples = 8; // Number of samples to take
 
 void setup() {
-  Serial.begin(115200);
-  delay(1000); // Give some time for the Serial Monitor to start
-  Serial.println("Touch Threshold Calibration");
+  Serial.begin(115200); // Initialize serial communication at 115200 baud
+  pinMode(touchPin, INPUT); // Set touch pin as input
 }
 
 void loop() {
-  touchValue = touchRead(touchPin); // Read capacitive touch sensor value
-  Serial.print("Touch Value: ");
-  Serial.println(touchValue);
+  // Get the average touch reading
+  int averageReading = getAverageTouchReading();
+  
+  // Print the average reading to the serial monitor
+  Serial.print("Average touch value: ");
+  Serial.println(averageReading);
 
-  delay(500); // Wait for 500ms before the next reading
+  // Wait 1 seconds before taking the next set of samples
+  delay(1000);
+}
+
+// Function to get the average touch reading
+int getAverageTouchReading() {
+  long total = 0;
+  
+  for (int i = 0; i < numSamples; i++) {
+    total += touchRead(touchPin); // Read the touch sensor value
+    delay(50); // Small delay between readings
+  }
+  
+  return total / numSamples; // Return the average
 }
