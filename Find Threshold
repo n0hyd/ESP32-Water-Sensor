@@ -17,7 +17,7 @@ void loop() {
   Serial.println(averageReading);
 
   // Wait 1 seconds before taking the next set of samples
-  delay(1000);
+  delay(2000);
 }
 
 // Function to get the average touch reading
