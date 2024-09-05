@@ -1,0 +1,218 @@
+#include <WiFi.h>
+#include <ESP_Mail_Client.h>
+#include <NTPClient.h>
+#include <WiFiUdp.h>
+#include <esp_sleep.h>
+
+// WiFi credentials
+const char* ssid = "your_SSID";
+const char* password = "your_WIFI_password";
+
+// Gmail credentials
+const char* smtpServer = "smtp.gmail.com";
+const int smtpPort = 465;
+const char* emailSenderAccount = "burkejones@gmail.com";
+const char* emailSenderPassword = "ewf cahb srci yugf";
+
+// Email recipient
+const char* emailRecipient = "9139090608@txt.att.net";
+
+// SMTP session object
+SMTPSession smtp;
+
+// GPIO settings
+const int touchPin = T0;  // Touch pin (T0 corresponds to GPIO 4 on some boards)
+const int threshold = 30; // Set this based on your calibration
+
+// NTP settings
+WiFiUDP ntpUDP;
+NTPClient timeClient(ntpUDP, "pool.ntp.org", 0, 60000); // Update time every minute for accuracy
+
+void setup() {
+  Serial.begin(115200);
+
+  // Initialize WiFi (but don't connect yet)
+  WiFi.mode(WIFI_STA);
+
+  // Set GPIO pin mode for powering the touch sensor
+  pinMode(touchPin, INPUT); // Set as input for touch sensing
+
+  // Configure touch pin as a wake-up source
+  esp_sleep_enable_touchpad_wakeup();
+  touchAttachInterrupt(touchPin, callback, threshold);
+
+  // Schedule a wake-up at 12:00 PM daily
+  uint64_t wakeupTime = getSecondsToMidday() * 1000000ULL; // Convert seconds to microseconds
+  esp_sleep_enable_timer_wakeup(wakeupTime);
+
+  Serial.println("Going to sleep now");
+  delay(1000);
+
+  // Go to deep sleep
+  esp_deep_sleep_start();
+}
+
+void loop() {
+  // This code will run only when the ESP32 wakes up
+  Serial.println("Waking up...");
+
+  // Check if woken up by the timer (12:00 PM check)
+  if (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_TIMER) {
+    Serial.println("12:00 PM check-in wakeup");
+
+    // Update time from NTP server
+    connectToWiFi();
+    timeClient.begin();
+    timeClient.update();
+
+    String currentTime = timeClient.getFormattedTime();
+    String currentDate = timeClient.getFormattedDate(); // Example format: "2024-08-29"
+    currentDate.replace("-", "/"); // Change format to MM/DD/YYYY
+
+    // Take the average touch reading
+    int touchValue = getAverageTouchReading();
+    Serial.print("Average touch value: ");
+    Serial.println(touchValue);
+
+    // If no water detected, send "just checking in" email
+    if (touchValue < threshold) {
+      sendCheckinEmail(currentTime, currentDate);
+    }
+
+    WiFi.disconnect(true);
+  }
+
+  // Check if woken up by touchpad
+  if (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_TOUCHPAD) {
+    Serial.println("Touchpad wake-up detected!");
+
+    // Take the average touch reading
+    int touchValue = getAverageTouchReading();
+    Serial.print("Average touch value: ");
+    Serial.println(touchValue);
+
+    // Initialize WiFi and connect
+    connectToWiFi();
+
+    // Update time from NTP server
+    timeClient.begin();
+    timeClient.update();
+
+    String currentTime = timeClient.getFormattedTime();
+    String currentDate = timeClient.getFormattedDate(); // Example format: "2024-08-29"
+    currentDate.replace("-", "/"); // Change format to MM/DD/YYYY
+
+    // Send the alert email with time and date
+    sendAlert(currentTime, currentDate);
+  }
+
+  // Go back to sleep after processing
+  Serial.println("Going back to sleep");
+  delay(1000);
+  esp_deep_sleep_start();
+}
+
+void connectToWiFi() {
+  WiFi.begin(ssid, password);
+  Serial.println("Connecting to WiFi...");
+  
+  unsigned long startAttemptTime = millis();
+  const unsigned long wifiTimeout = 60000; // 60 seconds timeout
+  
+  // Keep trying to connect to Wi-Fi until timeout
+  while (WiFi.status() != WL_CONNECTED && (millis() - startAttemptTime) < wifiTimeout) {
+    delay(500);
+    Serial.print(".");
+  }
+
+  // Check if connected or timeout
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("\nConnected to WiFi!");
+  } else {
+    Serial.println("\nWiFi connection failed. Going back to sleep...");
+    // Optional: handle failed connection (e.g., deep sleep for a while or retry)
+    esp_deep_sleep_start();
+  }
+}
+
+void sendAlert(String time, String date) {
+  // Set email subject and message
+  smtp.setPriority("High");
+  smtp.setSubject("Water Detected!");
+  String message = "DANGER Water Detected! Check basement ASAP! at " + time + " on " + date;
+  smtp.setMessage(message.c_str(), false);
+
+  // Set the recipient
+  smtp.addRecipient(emailRecipient);
+
+  // Send the email
+  if (!smtp.connect()) {
+    Serial.println("Failed to connect to SMTP server");
+    return;
+  }
+
+  if (!MailClient.sendMail(smtp)) {
+    Serial.println("Error sending Email, " + smtp.errorReason());
+  } else {
+    Serial.println("Email sent successfully!");
+  }
+
+  smtp.closeSession();
+}
+
+void sendCheckinEmail(String time, String date) {
+  // Set email subject and message
+  smtp.setPriority("Normal");
+  smtp.setSubject("NO water detected, just checking in");
+  String message = "NO water detected, just checking in: " + time + " on " + date;
+  smtp.setMessage(message.c_str(), false);
+
+  // Set the recipient
+  smtp.addRecipient(emailRecipient);
+
+  // Send the email
+  if (!smtp.connect()) {
+    Serial.println("Failed to connect to SMTP server");
+    return;
+  }
+
+  if (!MailClient.sendMail(smtp)) {
+    Serial.println("Error sending Email, " + smtp.errorReason());
+  } else {
+    Serial.println("Check-in email sent successfully!");
+  }
+
+  smtp.closeSession();
+}
+
+void callback() {
+  Serial.println("Touch threshold exceeded");
+}
+
+// Function to calculate seconds until next 12:00 PM
+uint64_t getSecondsToMidday() {
+  timeClient.update();
+  int currentHour = timeClient.getHours();
+  int currentMinute = timeClient.getMinutes();
+  int currentSecond = timeClient.getSeconds();
+
+  int secondsUntilMidday = (12 * 3600) - (currentHour * 3600 + currentMinute * 60 + currentSecond);
+  if (secondsUntilMidday <= 0) {
+    secondsUntilMidday += 86400; // Adjust for next day's midday
+  }
+
+  return secondsUntilMidday;
+}
+
+// Function to get the average touch reading
+int getAverageTouchReading() {
+  int total = 0;
+  const int numSamples = 8;
+  
+  for (int i = 0; i < numSamples; i++) {
+    total += touchRead(touchPin);
+    delay(50); // Small delay between readings
+  }
+  
+  return total / numSamples; // Return the average
+}
