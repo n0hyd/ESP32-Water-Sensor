@@ -49,11 +49,11 @@ void setup() {
   esp_sleep_enable_touchpad_wakeup();
   touchAttachInterrupt(touchPin, callback, threshold);
 
-  // Schedule a wake-up at 12:00 PM daily
-  #ifdef USE_TIMER
-  uint64_t wakeupTime = getSecondsToMidday() * 1000000ULL; // Convert seconds to microseconds
-  esp_sleep_enable_timer_wakeup(wakeupTime);
-  #endif
+  // Schedule a wake-up at 12:00 PM daily (uncomment all lines to use this)
+ // #ifdef USE_TIMER
+ // uint64_t wakeupTime = getSecondsToMidday() * 1000000ULL; // Convert seconds to microseconds
+ // esp_sleep_enable_timer_wakeup(wakeupTime);
+//  #endif
 
   #ifdef USE_INTERVAL
   uint64_t interval = 5 * 60 * 1000000ULL; // 5 minutes in microseconds
