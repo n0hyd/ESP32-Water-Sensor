@@ -5,8 +5,8 @@
 #include <esp_sleep.h>
 
 // WiFi credentials
-const char* ssid = "your_SSID";
-const char* password = "your_WIFI_password";
+const char* ssid = "JonesNetwork";
+const char* password = "jonespassword";
 
 // Gmail credentials
 const char* smtpServer = "smtp.gmail.com";
