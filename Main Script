@@ -98,6 +98,12 @@ void loop() {
       String currentDate = timeClient.getFormattedDate(); // Example format: "2024-08-29"
       currentDate.replace("-", "/"); // Change format to MM/DD/YYYY
 
+// Print the time and date to the serial monitor
+    Serial.print("Current Time: ");
+    Serial.println(formattedTime); // Example: "15:45:30"
+    Serial.print("Current Date: ");
+    Serial.println(formattedDate); // Example: "08/29/2024"
+
       // Read the battery voltage
       int adcValue = analogRead(BATTERY_PIN);
       float vOut = (adcValue * ADC_MAX_VOLTAGE) / ADC_MAX_VALUE;
@@ -157,6 +163,12 @@ void loop() {
       String currentTime = timeClient.getFormattedTime();
       String currentDate = timeClient.getFormattedDate(); // Example format: "2024-08-29"
       currentDate.replace("-", "/"); // Change format to MM/DD/YYYY
+
+// Print the time and date to the serial monitor
+    Serial.print("Current Time: ");
+    Serial.println(formattedTime); // Example: "15:45:30"
+    Serial.print("Current Date: ");
+    Serial.println(formattedDate); // Example: "08/29/2024"
 
       // Send the alert email with time and date
       sendAlert(currentTime, currentDate);
