@@ -28,8 +28,16 @@ const int threshold = 30; // Set this based on your calibration
 WiFiUDP ntpUDP;
 NTPClient timeClient(ntpUDP, "pool.ntp.org", 0, 60000); // Update time every minute for accuracy
 
+// Constants for battery voltage measurement
+#define BATTERY_PIN 35  // Analog pin for battery voltage measurement
+const float R1 = 100.0;  // Resistor 1 value (in kΩ)
+const float R2 = 220.0;  // Resistor 2 value (in kΩ)
+const float ADC_MAX_VOLTAGE = 3.3;  // Max voltage for ESP32 ADC
+const int ADC_MAX_VALUE = 4095;  // Max ADC value for 12-bit ADC
+
 void setup() {
   Serial.begin(115200);
+  analogReadResolution(12);  // 12-bit ADC resolution (0-4095)
 
   // Initialize WiFi (but don't connect yet)
   WiFi.mode(WIFI_STA);
@@ -42,8 +50,15 @@ void setup() {
   touchAttachInterrupt(touchPin, callback, threshold);
 
   // Schedule a wake-up at 12:00 PM daily
+  #ifdef USE_TIMER
   uint64_t wakeupTime = getSecondsToMidday() * 1000000ULL; // Convert seconds to microseconds
   esp_sleep_enable_timer_wakeup(wakeupTime);
+  #endif
+
+  #ifdef USE_INTERVAL
+  uint64_t interval = 5 * 60 * 1000000ULL; // 5 minutes in microseconds
+  esp_sleep_enable_timer_wakeup(interval);
+  #endif
 
   Serial.println("Going to sleep now");
   delay(1000);
@@ -56,30 +71,58 @@ void loop() {
   // This code will run only when the ESP32 wakes up
   Serial.println("Waking up...");
 
-  // Check if woken up by the timer (12:00 PM check)
+  // Check if woken up by the timer (12:00 PM check) or interval
   if (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_TIMER) {
-    Serial.println("12:00 PM check-in wakeup");
+    Serial.println("Timer wakeup detected");
 
     // Update time from NTP server
-    connectToWiFi();
-    timeClient.begin();
-    timeClient.update();
-
-    String currentTime = timeClient.getFormattedTime();
-    String currentDate = timeClient.getFormattedDate(); // Example format: "2024-08-29"
-    currentDate.replace("-", "/"); // Change format to MM/DD/YYYY
-
-    // Take the average touch reading
-    int touchValue = getAverageTouchReading();
-    Serial.print("Average touch value: ");
-    Serial.println(touchValue);
-
-    // If no water detected, send "just checking in" email
-    if (touchValue < threshold) {
-      sendCheckinEmail(currentTime, currentDate);
+    WiFi.begin(ssid, password);
+    bool connected = false;
+    unsigned long startTime = millis();
+    while (millis() - startTime < 60000 && WiFi.status() != WL_CONNECTED) {
+      delay(1000);
+      Serial.println("Connecting to WiFi...");
+    }
+    if (WiFi.status() == WL_CONNECTED) {
+      connected = true;
+      Serial.println("Connected to WiFi");
+    } else {
+      Serial.println("Failed to connect to WiFi within timeout");
     }
 
-    WiFi.disconnect(true);
+    if (connected) {
+      timeClient.begin();
+      timeClient.update();
+
+      String currentTime = timeClient.getFormattedTime();
+      String currentDate = timeClient.getFormattedDate(); // Example format: "2024-08-29"
+      currentDate.replace("-", "/"); // Change format to MM/DD/YYYY
+
+      // Read the battery voltage
+      int adcValue = analogRead(BATTERY_PIN);
+      float vOut = (adcValue * ADC_MAX_VOLTAGE) / ADC_MAX_VALUE;
+      float batteryVoltage = vOut / (R2 / (R1 + R2));
+
+      // Print the battery voltage to serial
+      Serial.print("ADC Value: ");
+      Serial.println(adcValue);
+      Serial.print("Measured Voltage (Vout): ");
+      Serial.println(vOut);
+      Serial.print("Battery Voltage: ");
+      Serial.println(batteryVoltage);
+
+      // Take the average touch reading
+      int touchValue = getAverageTouchReading();
+      Serial.print("Average touch value: ");
+      Serial.println(touchValue);
+
+      // If no water detected, send "just checking in" email
+      if (touchValue >= threshold) {
+        sendCheckinEmail(currentTime, currentDate, batteryVoltage);
+      }
+
+      WiFi.disconnect(true);
+    }
   }
 
   // Check if woken up by touchpad
@@ -92,18 +135,34 @@ void loop() {
     Serial.println(touchValue);
 
     // Initialize WiFi and connect
-    connectToWiFi();
+    WiFi.begin(ssid, password);
+    bool connected = false;
+    unsigned long startTime = millis();
+    while (millis() - startTime < 60000 && WiFi.status() != WL_CONNECTED) {
+      delay(1000);
+      Serial.println("Connecting to WiFi...");
+    }
+    if (WiFi.status() == WL_CONNECTED) {
+      connected = true;
+      Serial.println("Connected to WiFi");
+    } else {
+      Serial.println("Failed to connect to WiFi within timeout");
+    }
 
-    // Update time from NTP server
-    timeClient.begin();
-    timeClient.update();
+    if (connected) {
+      // Update time from NTP server
+      timeClient.begin();
+      timeClient.update();
 
-    String currentTime = timeClient.getFormattedTime();
-    String currentDate = timeClient.getFormattedDate(); // Example format: "2024-08-29"
-    currentDate.replace("-", "/"); // Change format to MM/DD/YYYY
+      String currentTime = timeClient.getFormattedTime();
+      String currentDate = timeClient.getFormattedDate(); // Example format: "2024-08-29"
+      currentDate.replace("-", "/"); // Change format to MM/DD/YYYY
 
-    // Send the alert email with time and date
-    sendAlert(currentTime, currentDate);
+      // Send the alert email with time and date
+      sendAlert(currentTime, currentDate);
+    }
+
+    WiFi.disconnect(true);
   }
 
   // Go back to sleep after processing
@@ -112,34 +171,13 @@ void loop() {
   esp_deep_sleep_start();
 }
 
-void connectToWiFi() {
-  WiFi.begin(ssid, password);
-  Serial.println("Connecting to WiFi...");
-  
-  unsigned long startAttemptTime = millis();
-  const unsigned long wifiTimeout = 60000; // 60 seconds timeout
-  
-  // Keep trying to connect to Wi-Fi until timeout
-  while (WiFi.status() != WL_CONNECTED && (millis() - startAttemptTime) < wifiTimeout) {
-    delay(500);
-    Serial.print(".");
-  }
-
-  // Check if connected or timeout
-  if (WiFi.status() == WL_CONNECTED) {
-    Serial.println("\nConnected to WiFi!");
-  } else {
-    Serial.println("\nWiFi connection failed. Going back to sleep...");
-    // Optional: handle failed connection (e.g., deep sleep for a while or retry)
-    esp_deep_sleep_start();
-  }
-}
-
 void sendAlert(String time, String date) {
   // Set email subject and message
   smtp.setPriority("High");
   smtp.setSubject("Water Detected!");
-  String message = "DANGER Water Detected! Check basement ASAP! at " + time + " on " + date;
+
+  // Updated message with line breaks
+  String message = "DANGER Water Detected!\nCheck basement ASAP!\n" + time + " on " + date;
   smtp.setMessage(message.c_str(), false);
 
   // Set the recipient
@@ -154,17 +192,17 @@ void sendAlert(String time, String date) {
   if (!MailClient.sendMail(smtp)) {
     Serial.println("Error sending Email, " + smtp.errorReason());
   } else {
-    Serial.println("Email sent successfully!");
+    Serial.println("Water detection email sent successfully!");
   }
 
   smtp.closeSession();
 }
 
-void sendCheckinEmail(String time, String date) {
+void sendCheckinEmail(String time, String date, float batteryVoltage) {
   // Set email subject and message
   smtp.setPriority("Normal");
   smtp.setSubject("NO water detected, just checking in");
-  String message = "NO water detected, just checking in: " + time + " on " + date;
+  String message = "NO water detected, just checking in:\nTime: " + time + "\nDate: " + date + "\nBattery Voltage: " + String(batteryVoltage) + "V";
   smtp.setMessage(message.c_str(), false);
 
   // Set the recipient
@@ -212,11 +250,6 @@ int getAverageTouchReading() {
   for (int i = 0; i < numSamples; i++) {
     total += touchRead(touchPin);
     delay(50); // Small delay between readings
-  }
-  
-  return total / numSamples; // Return the average
-}
-
   }
   
   return total / numSamples; // Return the average
