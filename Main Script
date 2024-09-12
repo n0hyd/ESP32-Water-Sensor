@@ -1,8 +1,7 @@
 #include <WiFi.h>
 #include <ESP_Mail_Client.h>
-#include <NTPClient.h>
-#include <WiFiUdp.h>
 #include <esp_sleep.h>
+#include <time.h>
 
 // WiFi credentials
 const char* ssid = "JonesNetwork";
@@ -24,12 +23,13 @@ SMTPSession smtp;
 const int touchPin = T0;  // Touch pin (T0 corresponds to GPIO 4 on some boards)
 const int threshold = 30; // Set this based on your calibration
 
-// NTP settings
-WiFiUDP ntpUDP;
-NTPClient timeClient(ntpUDP, "pool.ntp.org", 0, 60000); // Update time every minute for accuracy
+// NTP server settings
+const char* ntpServer = "pool.ntp.org";
+const long gmtOffset_sec = -21600;  // UTC -6 hours (CST)
+const int daylightOffset_sec = 3600;  // 1 hour for daylight saving time
 
 // Uncomment this line to enable battery voltage measurement
-// #define ENABLE_BATTERY_VOLTAGE
+#define ENABLE_BATTERY_VOLTAGE
 
 // Constants for battery voltage measurement
 #ifdef ENABLE_BATTERY_VOLTAGE
@@ -54,11 +54,11 @@ void setup() {
   esp_sleep_enable_touchpad_wakeup();
   touchAttachInterrupt(touchPin, callback, threshold);
 
-  // Schedule a wake-up at 12:00 PM daily (uncomment all lines to use this)
- // #ifdef USE_TIMER
- // uint64_t wakeupTime = getSecondsToMidday() * 1000000ULL; // Convert seconds to microseconds
- // esp_sleep_enable_timer_wakeup(wakeupTime);
-//  #endif
+  // Schedule a wake-up at 12:00 PM daily (uncomment to use)
+  //#ifdef USE_TIMER
+  //uint64_t wakeupTime = getSecondsToMidday() * 1000000ULL; // Convert seconds to microseconds
+  //esp_sleep_enable_timer_wakeup(wakeupTime);
+  //#endif
 
   #ifdef USE_INTERVAL
   uint64_t interval = 5 * 60 * 1000000ULL; // 5 minutes in microseconds
@@ -80,7 +80,7 @@ void loop() {
   if (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_TIMER) {
     Serial.println("Timer wakeup detected");
 
-    // Update time from NTP server
+    // Connect to WiFi to update time
     WiFi.begin(ssid, password);
     bool connected = false;
     unsigned long startTime = millis();
@@ -91,38 +91,39 @@ void loop() {
     if (WiFi.status() == WL_CONNECTED) {
       connected = true;
       Serial.println("Connected to WiFi");
-    } else {
-      Serial.println("Failed to connect to WiFi within timeout");
-    }
 
-    if (connected) {
-      timeClient.begin();
-      timeClient.update();
+      // Initialize and update time
+      configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
+      struct tm timeinfo;
+      if (!getLocalTime(&timeinfo)) {
+        Serial.println("Failed to obtain time");
+      } else {
+        char timeStr[64];
+        strftime(timeStr, sizeof(timeStr), "%H:%M:%S", &timeinfo); // Time format
+        Serial.print("Current Time: ");
+        Serial.println(timeStr);
 
-      String currentTime = timeClient.getFormattedTime();
-      String currentDate = timeClient.getFormattedDate(); // Example format: "2024-08-29"
-      currentDate.replace("-", "/"); // Change format to MM/DD/YYYY
+        char dateStr[64];
+        strftime(dateStr, sizeof(dateStr), "%m/%d/%Y", &timeinfo); // Date format
+        Serial.print("Current Date: ");
+        Serial.println(dateStr);
 
-      Serial.print("Current Time: ");
-      Serial.println(currentTime); // Example: "15:45:30"
-      Serial.print("Current Date: ");
-      Serial.println(currentDate); // Example: "08/29/2024"
+        // If battery voltage is enabled, read and print it
+        #ifdef ENABLE_BATTERY_VOLTAGE
+        float batteryVoltage = readBatteryVoltage();
+        Serial.print("Battery Voltage: ");
+        Serial.println(batteryVoltage);
+        #endif
 
-      // If battery voltage is enabled, read and print it
-      #ifdef ENABLE_BATTERY_VOLTAGE
-      float batteryVoltage = readBatteryVoltage();
-      Serial.print("Battery Voltage: ");
-      Serial.println(batteryVoltage);
-      #endif
+        // Take the average touch reading
+        int touchValue = getAverageTouchReading();
+        Serial.print("Average touch value: ");
+        Serial.println(touchValue);
 
-      // Take the average touch reading
-      int touchValue = getAverageTouchReading();
-      Serial.print("Average touch value: ");
-      Serial.println(touchValue);
-
-      // If no water detected, send "just checking in" email
-      if (touchValue >= threshold) {
-        sendCheckinEmail(currentTime, currentDate, batteryVoltage);
+        // If no water detected, send "just checking in" email
+        if (touchValue >= threshold) {
+          sendCheckinEmail(timeStr, dateStr, batteryVoltage);
+        }
       }
 
       WiFi.disconnect(true);
@@ -149,29 +150,29 @@ void loop() {
     if (WiFi.status() == WL_CONNECTED) {
       connected = true;
       Serial.println("Connected to WiFi");
-    } else {
-      Serial.println("Failed to connect to WiFi within timeout");
+
+      // Initialize and update time
+      configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
+      struct tm timeinfo;
+      if (!getLocalTime(&timeinfo)) {
+        Serial.println("Failed to obtain time");
+      } else {
+        char timeStr[64];
+        strftime(timeStr, sizeof(timeStr), "%H:%M:%S", &timeinfo);
+        Serial.print("Current Time: ");
+        Serial.println(timeStr);
+
+        char dateStr[64];
+        strftime(dateStr, sizeof(dateStr), "%m/%d/%Y", &timeinfo);
+        Serial.print("Current Date: ");
+        Serial.println(dateStr);
+
+        // Send the alert email with time and date
+        sendAlert(timeStr, dateStr);
+      }
+
+      WiFi.disconnect(true);
     }
-
-    if (connected) {
-      // Update time from NTP server
-      timeClient.begin();
-      timeClient.update();
-
-      String currentTime = timeClient.getFormattedTime();
-      String currentDate = timeClient.getFormattedDate(); // Example format: "2024-08-29"
-      currentDate.replace("-", "/"); // Change format to MM/DD/YYYY
-
-      Serial.print("Current Time: ");
-      Serial.println(currentTime);
-      Serial.print("Current Date: ");
-      Serial.println(currentDate);
-
-      // Send the alert email with time and date
-      sendAlert(currentTime, currentDate);
-    }
-
-    WiFi.disconnect(true);
   }
 
   // Go back to sleep after processing
@@ -233,21 +234,6 @@ void sendCheckinEmail(String time, String date, float batteryVoltage) {
   smtp.closeSession();
 }
 
-// Function to calculate seconds until next 12:00 PM
-uint64_t getSecondsToMidday() {
-  timeClient.update();
-  int currentHour = timeClient.getHours();
-  int currentMinute = timeClient.getMinutes();
-  int currentSecond = timeClient.getSeconds();
-
-  int secondsUntilMidday = (12 * 3600) - (currentHour * 3600 + currentMinute * 60 + currentSecond);
-  if (secondsUntilMidday <= 0) {
-    secondsUntilMidday += 86400; // Adjust for next day's midday
-  }
-
-  return secondsUntilMidday;
-}
-
 // Function to get the average touch reading
 int getAverageTouchReading() {
   int sum = 0;
@@ -266,5 +252,3 @@ float readBatteryVoltage() {
   return voltage * ((R1 + R2) / R2); // Apply voltage divider formula
 }
 #endif
-
-
