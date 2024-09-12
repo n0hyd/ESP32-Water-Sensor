@@ -1,261 +1,246 @@
 #include <WiFi.h>
 #include <ESP_Mail_Client.h>
-#include <esp_sleep.h>
-#include <time.h>
+#include "time.h"
+
+// Declare global SMTPSession and Session_Config objects
+SMTPSession smtp;
+Session_Config config;
 
 // WiFi credentials
-const char* ssid = "JonesNetwork";
+const char* ssid = "Jones Network";
 const char* password = "jonespassword";
 
-// Gmail credentials
-const char* smtpServer = "smtp.gmail.com";
-const int smtpPort = 465;
-const char* emailSenderAccount = "burkejones@gmail.com";
-const char* emailSenderPassword = "ewf cahb srci yugf";
+// Email details
+const char* smtp_host = "smtp.google.com"; // Example: using Office 365
+const int smtp_port = 587;
+const char* smtp_email = "burkejones@gmail.com"; // Sender's email
+const char* smtp_password = "ewf cahb srci yugf"; // App-specific password
 
-// Email recipient
-const char* emailRecipient = "9139090608@txt.att.net";
+// Email recipients
+const char* recipient_email = "9139090608@txt.att.net"; // Recipient email (e.g., SMS gateway)
 
-// SMTP session object
-SMTPSession smtp;
-
-// GPIO settings
-const int touchPin = T0;  // Touch pin (T0 corresponds to GPIO 4 on some boards)
-const int threshold = 30; // Set this based on your calibration
-
-// NTP server settings
+// Time and date settings
 const char* ntpServer = "pool.ntp.org";
-const long gmtOffset_sec = -21600;  // UTC -6 hours (CST)
-const int daylightOffset_sec = 3600;  // 1 hour for daylight saving time
+const long gmtOffset_sec = -21600;   // Central Time (UTC -6 hours)
+const int daylightOffset_sec = 3600; // Daylight Saving Time offset (1 hour)
 
-// Uncomment this line to enable battery voltage measurement
-#define ENABLE_BATTERY_VOLTAGE
+// Battery Voltage
+#define BATTERY_PIN 34 // ADC pin to read battery voltage
+float batteryVoltage = 0.0;
+const float voltageThreshold = 3.3; // Low voltage threshold
+const float voltageDividerRatio = 10.0 / 75.0; // Ratio for 10kΩ and 75kΩ resistors
 
-// Constants for battery voltage measurement
-#ifdef ENABLE_BATTERY_VOLTAGE
-  #define BATTERY_PIN 35  // Analog pin for battery voltage measurement
-  const float R1 = 100.0;  // Resistor 1 value (in kΩ)
-  const float R2 = 220.0;  // Resistor 2 value (in kΩ)
-  const float ADC_MAX_VOLTAGE = 3.3;  // Max voltage for ESP32 ADC
-  const int ADC_MAX_VALUE = 4095;  // Max ADC value for 12-bit ADC
-#endif
+// WiFi connection settings
+const int wifiTimeoutMs = 10000; // 10 seconds timeout for Wi-Fi connection attempts
 
+// Touchpad setup
+const int touchPin = T0; // Capacitive touch pin
+const int threshold = 30; // Threshold value for water detection
+const int numReadings = 10; // Number of readings to average
+int bootCount = 0;
+
+// Function declarations
+void sendAlert(String subject, String body);
+void smtpCallback(SMTP_Status status);
+void printLocalTime(String& timeStr, String& dateStr);
+void callback();
+void checkBattery();
+bool connectToWiFi();
+float readTouchSensor();
+
+// Setup
 void setup() {
   Serial.begin(115200);
-  analogReadResolution(12);  // 12-bit ADC resolution (0-4095)
+  
+  // Increment boot count
+  ++bootCount;
+  Serial.println("Boot number: " + String(bootCount));
 
-  // Initialize WiFi (but don't connect yet)
-  WiFi.mode(WIFI_STA);
+  // Attempt to connect to Wi-Fi
+  if (!connectToWiFi()) {
+    Serial.println("Wi-Fi connection failed after timeout, entering deep sleep...");
+    esp_deep_sleep_start();
+  }
 
-  // Set GPIO pin mode for powering the touch sensor
-  pinMode(touchPin, INPUT); // Set as input for touch sensing
+  // Initialize time
+  configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
 
-  // Configure touch pin as a wake-up source
+  // Check battery voltage
+  checkBattery();
+
+  // Set up email session config
+  config.server.host_name = smtp_host;
+  config.server.port = smtp_port;
+  config.login.email = smtp_email;
+  config.login.password = smtp_password;
+  config.login.user_domain = WiFi.localIP().toString().c_str(); // Set to client domain or public IP
+
+  // Configure touchpad wakeup
   esp_sleep_enable_touchpad_wakeup();
   touchAttachInterrupt(touchPin, callback, threshold);
 
-  // Schedule a wake-up at 12:00 PM daily (uncomment to use)
-  //#ifdef USE_TIMER
-  //uint64_t wakeupTime = getSecondsToMidday() * 1000000ULL; // Convert seconds to microseconds
-  //esp_sleep_enable_timer_wakeup(wakeupTime);
-  //#endif
+  // Configure timer wakeup (e.g., every 24 hours)
+  esp_sleep_enable_timer_wakeup(24 * 60 * 60 * 1e6);
 
-  #ifdef USE_INTERVAL
-  uint64_t interval = 5 * 60 * 1000000ULL; // 5 minutes in microseconds
-  esp_sleep_enable_timer_wakeup(interval);
-  #endif
-
-  Serial.println("Going to sleep now");
-  delay(1000);
-
-  // Go to deep sleep
-  esp_deep_sleep_start();
-}
-
-void loop() {
-  // This code will run only when the ESP32 wakes up
-  Serial.println("Waking up...");
-
-  // Check if woken up by the timer (12:00 PM check) or interval
+  // If woken up by timer, check time and water sensor
   if (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_TIMER) {
-    Serial.println("Timer wakeup detected");
+    String timeStr;
+    String dateStr;
+    printLocalTime(timeStr, dateStr);
 
-    // Connect to WiFi to update time
-    WiFi.begin(ssid, password);
-    bool connected = false;
-    unsigned long startTime = millis();
-    while (millis() - startTime < 60000 && WiFi.status() != WL_CONNECTED) {
-      delay(1000);
-      Serial.println("Connecting to WiFi...");
-    }
-    if (WiFi.status() == WL_CONNECTED) {
-      connected = true;
-      Serial.println("Connected to WiFi");
+    if (timeStr == "12:00 PM") {
+      checkBattery();
+      
+      float touchValue = readTouchSensor();
+      bool waterDetected = touchValue > threshold;
 
-      // Initialize and update time
-      configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
-      struct tm timeinfo;
-      if (!getLocalTime(&timeinfo)) {
-        Serial.println("Failed to obtain time");
+      String subject;
+      String messageBody;
+
+      if (waterDetected) {
+        subject = "Water Detected!";
+        messageBody = "DANGER Water Detected!\nCheck basement ASAP!";
       } else {
-        char timeStr[64];
-        strftime(timeStr, sizeof(timeStr), "%H:%M:%S", &timeinfo); // Time format
-        Serial.print("Current Time: ");
-        Serial.println(timeStr);
-
-        char dateStr[64];
-        strftime(dateStr, sizeof(dateStr), "%m/%d/%Y", &timeinfo); // Date format
-        Serial.print("Current Date: ");
-        Serial.println(dateStr);
-
-        // If battery voltage is enabled, read and print it
-        #ifdef ENABLE_BATTERY_VOLTAGE
-        float batteryVoltage = readBatteryVoltage();
-        Serial.print("Battery Voltage: ");
-        Serial.println(batteryVoltage);
-        #endif
-
-        // Take the average touch reading
-        int touchValue = getAverageTouchReading();
-        Serial.print("Average touch value: ");
-        Serial.println(touchValue);
-
-        // If no water detected, send "just checking in" email
-        if (touchValue >= threshold) {
-          sendCheckinEmail(timeStr, dateStr, batteryVoltage);
-        }
+        subject = "Just Checking In";
+        messageBody = "NO water detected, just checking in!\nBattery Voltage: " + String(batteryVoltage, 2) + "V";
       }
-
-      WiFi.disconnect(true);
+      messageBody += "\nDate and Time: " + dateStr + " " + timeStr;
+      sendAlert(subject, messageBody);
     }
   }
 
-  // Check if woken up by touchpad
-  if (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_TOUCHPAD) {
-    Serial.println("Touchpad wake-up detected!");
-
-    // Take the average touch reading
-    int touchValue = getAverageTouchReading();
-    Serial.print("Average touch value: ");
-    Serial.println(touchValue);
-
-    // Initialize WiFi and connect
-    WiFi.begin(ssid, password);
-    bool connected = false;
-    unsigned long startTime = millis();
-    while (millis() - startTime < 60000 && WiFi.status() != WL_CONNECTED) {
-      delay(1000);
-      Serial.println("Connecting to WiFi...");
-    }
-    if (WiFi.status() == WL_CONNECTED) {
-      connected = true;
-      Serial.println("Connected to WiFi");
-
-      // Initialize and update time
-      configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
-      struct tm timeinfo;
-      if (!getLocalTime(&timeinfo)) {
-        Serial.println("Failed to obtain time");
-      } else {
-        char timeStr[64];
-        strftime(timeStr, sizeof(timeStr), "%H:%M:%S", &timeinfo);
-        Serial.print("Current Time: ");
-        Serial.println(timeStr);
-
-        char dateStr[64];
-        strftime(dateStr, sizeof(dateStr), "%m/%d/%Y", &timeinfo);
-        Serial.print("Current Date: ");
-        Serial.println(dateStr);
-
-        // Send the alert email with time and date
-        sendAlert(timeStr, dateStr);
-      }
-
-      WiFi.disconnect(true);
-    }
-  }
-
-  // Go back to sleep after processing
-  Serial.println("Going back to sleep");
-  delay(1000);
+  // Sleep for touchpad wakeup or timer wakeup
   esp_deep_sleep_start();
 }
 
-// Function to send water detected alert
-void sendAlert(String time, String date) {
-  smtp.setPriority("High");
-  smtp.setSubject("Water Detected!");
-
-  String message = "DANGER Water Detected!\nCheck basement ASAP!\n" + time + " on " + date;
-  smtp.setMessage(message.c_str(), false);
-
-  smtp.addRecipient(emailRecipient);
-
-  if (!smtp.connect()) {
-    Serial.println("Failed to connect to SMTP server");
-    return;
-  }
-
-  if (!MailClient.sendMail(smtp)) {
-    Serial.println("Error sending Email, " + smtp.errorReason());
-  } else {
-    Serial.println("Water detection email sent successfully!");
-  }
-
-  smtp.closeSession();
+// Loop (won't be reached due to deep sleep mode)
+void loop() {
+  // Empty
 }
 
-// Function to send check-in email
-void sendCheckinEmail(String time, String date, float batteryVoltage) {
-  smtp.setPriority("Normal");
-  smtp.setSubject("NO water detected, just checking in");
-  
-  String message = "NO water detected, just checking in:\nTime: " + time + "\nDate: " + date;
-  
-  #ifdef ENABLE_BATTERY_VOLTAGE
-  message += "\nBattery Voltage: " + String(batteryVoltage) + "V";
-  #endif
-
-  smtp.setMessage(message.c_str(), false);
-
-  smtp.addRecipient(emailRecipient);
-
-  if (!smtp.connect()) {
-    Serial.println("Failed to connect to SMTP server");
-    return;
-  }
-
-  if (!MailClient.sendMail(smtp)) {
-    Serial.println("Error sending Email, " + smtp.errorReason());
-  } else {
-    Serial.println("Check-in email sent successfully!");
-  }
-
-  smtp.closeSession();
-}
-
-// Function to get the average touch reading
-int getAverageTouchReading() {
-  int sum = 0;
-  for (int i = 0; i < 8; i++) {
-    sum += touchRead(touchPin);
-    delay(10);  // Small delay to avoid reading too fast
-  }
-  return sum / 8;
-}
-
-//callback function
+// Callback function for touchpad wakeup
 void callback() {
-  // Code to handle the touch interrupt
-  Serial.println("Touch threshold exceeded");
+  String timeStr;
+  String dateStr;
+  printLocalTime(timeStr, dateStr);
+  
+  checkBattery();
+  float touchValue = readTouchSensor();
+
+  if (touchValue > threshold) {
+    String messageBody = "DANGER Water Detected!\nCheck basement ASAP!";
+    messageBody += "\nDate and Time: " + dateStr + " " + timeStr;
+    sendAlert("Water Detected!", messageBody);
+  }
+
+  esp_deep_sleep_start(); // Go back to deep sleep after sending email
 }
 
+// Print local time and date
+void printLocalTime(String& timeStr, String& dateStr) {
+  struct tm timeinfo;
+  if (!getLocalTime(&timeinfo)) {
+    Serial.println("Failed to obtain time");
+    return;
+  }
+  char dateBuffer[20];
+  char timeBuffer[10];
+  strftime(dateBuffer, sizeof(dateBuffer), "%m/%d/%Y", &timeinfo);
+  strftime(timeBuffer, sizeof(timeBuffer), "%I:%M %p", &timeinfo);
 
-#ifdef ENABLE_BATTERY_VOLTAGE
-// Function to read battery voltage
-float readBatteryVoltage() {
-  int analogValue = analogRead(BATTERY_PIN);
-  float voltage = (analogValue * ADC_MAX_VOLTAGE) / ADC_MAX_VALUE;
-  return voltage * ((R1 + R2) / R2); // Apply voltage divider formula
+  dateStr = String(dateBuffer);
+  timeStr = String(timeBuffer);
+
+  Serial.println(dateStr + " " + timeStr);
 }
-#endif
+
+// Send an alert email
+void sendAlert(String subject, String body) {
+  // Declare the SMTP_Message class variable
+  SMTP_Message message;
+
+  // Set the message headers
+  message.sender.name = "Burke Jones";
+  message.sender.email = smtp_email;
+  message.subject = subject;
+  message.addRecipient("Recipient", recipient_email);
+
+  // Set the message content
+  message.text.content = body;
+
+  // Set debug option
+  smtp.debug(1);
+
+  // Set the callback function to get the sending results
+  smtp.callback(smtpCallback);
+
+  // Connect to the SMTP server and send email
+  if (!smtp.connect(&config)) {
+    Serial.println("Failed to connect to SMTP server");
+    return;
+  }
+
+  if (!MailClient.sendMail(&smtp, &message)) {
+    Serial.println("Error sending Email: " + smtp.errorReason());
+  } else {
+    Serial.println("Email sent successfully!");
+  }
+
+  // Close the SMTP session
+  smtp.closeSession();
+}
+
+// SMTP callback function
+void smtpCallback(SMTP_Status status) {
+  // Print the status of the email sending process
+  Serial.println(status.info());
+
+  if (status.success()) {
+    Serial.println("Email sent successfully.");
+  }
+}
+
+// Function to check the battery voltage
+void checkBattery() {
+  // Read raw ADC value and convert it to voltage
+  float adcValue = analogRead(BATTERY_PIN);
+  batteryVoltage = adcValue * (3.3 / 4095.0) / voltageDividerRatio; // Adjust for voltage divider ratio
+
+  Serial.println("Battery Voltage: " + String(batteryVoltage, 2) + "V");
+
+  if (batteryVoltage < voltageThreshold) {
+    Serial.println("WARNING: Battery voltage is low!");
+  }
+}
+
+// Function to connect to Wi-Fi with timeout
+bool connectToWiFi() {
+  WiFi.begin(ssid, password);
+  unsigned long startAttemptTime = millis();
+
+  // Keep trying to connect until the timeout or connection is successful
+  while (WiFi.status() != WL_CONNECTED && millis() - startAttemptTime < wifiTimeoutMs) {
+    Serial.println("Attempting to connect to Wi-Fi...");
+    delay(500);
+  }
+
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("Connected to Wi-Fi");
+    return true;
+  } else {
+    Serial.println("Failed to connect to Wi-Fi within the timeout");
+    return false;
+  }
+}
+
+// Function to read the capacitive touch sensor and average readings
+float readTouchSensor() {
+  float total = 0.0;
+  for (int i = 0; i < numReadings; ++i) {
+    total += touchRead(touchPin);
+    delay(10); // Short delay between readings
+  }
+  float average = total / numReadings;
+  return average;
+}
+
