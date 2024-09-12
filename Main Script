@@ -244,6 +244,13 @@ int getAverageTouchReading() {
   return sum / 8;
 }
 
+//callback function
+void callback() {
+  // Code to handle the touch interrupt
+  Serial.println("Touch threshold exceeded");
+}
+
+
 #ifdef ENABLE_BATTERY_VOLTAGE
 // Function to read battery voltage
 float readBatteryVoltage() {
