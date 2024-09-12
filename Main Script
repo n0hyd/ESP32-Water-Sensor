@@ -24,137 +24,123 @@ const char* ntpServer = "pool.ntp.org";
 const long gmtOffset_sec = -21600;   // Central Time (UTC -6 hours)
 const int daylightOffset_sec = 3600; // Daylight Saving Time offset (1 hour)
 
+// Capacitive Touch Sensor setup
+const int touchPin = T0; // GPIO 4
+const int threshold = 30; // Example threshold value for touch detection
+const int numSamples = 10; // Number of samples to take for averaging
+
+// Timer settings
+const unsigned long timerIntervalMs = 24 * 60 * 60 * 1000; // 24 hours
+const unsigned long timerWakeUpMs = 12 * 60 * 60 * 1000; // 12 hours from now
+
 // Battery Voltage
 #define BATTERY_PIN 34 // ADC pin to read battery voltage
 float batteryVoltage = 0.0;
 const float voltageThreshold = 3.3; // Low voltage threshold
 const float voltageDividerRatio = 10.0 / 75.0; // Ratio for 10kΩ and 75kΩ resistors
 
-// WiFi connection settings
-const int wifiTimeoutMs = 10000; // 10 seconds timeout for Wi-Fi connection attempts
-
-// Touchpad setup
-const int touchPin = T0; // Capacitive touch pin
-const int threshold = 30; // Threshold value for water detection
-const int numReadings = 10; // Number of readings to average
-int bootCount = 0;
+// WiFi timeout
+const unsigned long wifiTimeoutMs = 10000; // Timeout for Wi-Fi connection attempt (10 seconds)
 
 // Function declarations
 void sendAlert(String subject, String body);
 void smtpCallback(SMTP_Status status);
 void printLocalTime(String& timeStr, String& dateStr);
-void callback();
 void checkBattery();
+bool checkWaterSensor();
 bool connectToWiFi();
-float readTouchSensor();
+unsigned long calculateSleepDuration();
 
-// Setup
+// Setup function
 void setup() {
   Serial.begin(115200);
-  
+
   // Increment boot count
+  static int bootCount = 0;
   ++bootCount;
   Serial.println("Boot number: " + String(bootCount));
 
-  // Attempt to connect to Wi-Fi
-  if (!connectToWiFi()) {
-    Serial.println("Wi-Fi connection failed after timeout, entering deep sleep...");
-    esp_deep_sleep_start();
-  }
-
-  // Initialize time
-  configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
-
-  // Check battery voltage
-  checkBattery();
-
-  // Set up email session config
-  config.server.host_name = smtp_host;
-  config.server.port = smtp_port;
-  config.login.email = smtp_email;
-  config.login.password = smtp_password;
-  config.login.user_domain = WiFi.localIP().toString().c_str(); // Set to client domain or public IP
-
-  // Configure touchpad wakeup
-  esp_sleep_enable_touchpad_wakeup();
-  touchAttachInterrupt(touchPin, callback, threshold);
-
-  // Configure timer wakeup (e.g., every 24 hours)
-  esp_sleep_enable_timer_wakeup(24 * 60 * 60 * 1e6);
-
-  // If woken up by timer, check time and water sensor
+  // Check wakeup cause
   if (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_TIMER) {
-    String timeStr;
-    String dateStr;
-    printLocalTime(timeStr, dateStr);
+    // Timer wakeup
+    Serial.println("Woke up by timer");
+    checkBattery();
+    if (!checkWaterSensor()) { // Check water sensor when woken up by timer
+      String timeStr, dateStr;
+      printLocalTime(timeStr, dateStr);
+      String emailBody = "NO water detected\nBattery Voltage: " + String(batteryVoltage, 2) + "V";
+      sendAlert("Just checking in", emailBody);
+    }
 
-    if (timeStr == "12:00 PM") {
-      checkBattery();
-      
-      float touchValue = readTouchSensor();
-      bool waterDetected = touchValue > threshold;
-
-      String subject;
-      String messageBody;
-
-      if (waterDetected) {
-        subject = "Water Detected!";
-        messageBody = "DANGER Water Detected!\nCheck basement ASAP!";
-      } else {
-        subject = "Just Checking In";
-        messageBody = "NO water detected, just checking in!\nBattery Voltage: " + String(batteryVoltage, 2) + "V";
-      }
-      messageBody += "\nDate and Time: " + dateStr + " " + timeStr;
-      sendAlert(subject, messageBody);
+  } else if (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_TOUCHPAD) {
+    // Touch wakeup
+    Serial.println("Woke up by touch");
+    if (checkWaterSensor()) { // Check water sensor when woken up by touch
+      String timeStr, dateStr;
+      printLocalTime(timeStr, dateStr);
+      String emailBody = "DANGER Water Detected!\nCheck basement ASAP!";
+      sendAlert("Water Detected", emailBody);
     }
   }
 
-  // Sleep for touchpad wakeup or timer wakeup
+  // Prepare for deep sleep
+  unsigned long sleepDuration = calculateSleepDuration();
+  esp_sleep_enable_timer_wakeup(sleepDuration);
   esp_deep_sleep_start();
 }
 
-// Loop (won't be reached due to deep sleep mode)
 void loop() {
-  // Empty
+  // Won't be reached due to deep sleep mode
 }
 
-// Callback function for touchpad wakeup
-void callback() {
-  String timeStr;
-  String dateStr;
-  printLocalTime(timeStr, dateStr);
-  
-  checkBattery();
-  float touchValue = readTouchSensor();
-
-  if (touchValue > threshold) {
-    String messageBody = "DANGER Water Detected!\nCheck basement ASAP!";
-    messageBody += "\nDate and Time: " + dateStr + " " + timeStr;
-    sendAlert("Water Detected!", messageBody);
-  }
-
-  esp_deep_sleep_start(); // Go back to deep sleep after sending email
-}
-
-// Print local time and date
-void printLocalTime(String& timeStr, String& dateStr) {
+// Function to calculate sleep duration for timer wakeup
+unsigned long calculateSleepDuration() {
+  time_t now;
   struct tm timeinfo;
-  if (!getLocalTime(&timeinfo)) {
-    Serial.println("Failed to obtain time");
-    return;
-  }
-  char dateBuffer[20];
-  char timeBuffer[10];
-  strftime(dateBuffer, sizeof(dateBuffer), "%m/%d/%Y", &timeinfo);
-  strftime(timeBuffer, sizeof(timeBuffer), "%I:%M %p", &timeinfo);
+  time(&now);
+  localtime_r(&now, &timeinfo);
 
-  dateStr = String(dateBuffer);
-  timeStr = String(timeBuffer);
-
-  Serial.println(dateStr + " " + timeStr);
+  int hoursUntilNextWake = (12 - timeinfo.tm_hour + 24) % 24;
+  unsigned long sleepDuration = (hoursUntilNextWake * 3600 * 1000000) - (timeinfo.tm_min * 60 * 1000000) - (timeinfo.tm_sec * 1000000);
+  return sleepDuration;
 }
 
-// Send an alert email
+// Function to check water sensor
+bool checkWaterSensor() {
+  // Read touch sensor multiple times and average the readings
+  int readings[numSamples];
+  for (int i = 0; i < numSamples; i++) {
+    readings[i] = touchRead(touchPin);
+    delay(50); // Small delay between readings
+  }
+  
+  // Sort readings and remove highest and lowest
+  std::sort(readings, readings + numSamples);
+  
+  int sum = 0;
+  for (int i = 1; i < numSamples - 1; i++) { // Exclude highest and lowest
+    sum += readings[i];
+  }
+  
+  int average = sum / (numSamples - 2); // Average of remaining readings
+  Serial.println("Average Touch Sensor Reading: " + String(average));
+
+  // Check if the average reading exceeds the threshold
+  return average > threshold;
+}
+
+// Function to check the battery voltage
+void checkBattery() {
+  float adcValue = analogRead(BATTERY_PIN);
+  batteryVoltage = adcValue * (3.3 / 4095.0) / voltageDividerRatio; // Adjust for voltage divider ratio
+  Serial.println("Battery Voltage: " + String(batteryVoltage, 2) + "V");
+
+  if (batteryVoltage < voltageThreshold) {
+    Serial.println("WARNING: Battery voltage is low!");
+  }
+}
+
+// Function to send an email
 void sendAlert(String subject, String body) {
   // Declare the SMTP_Message class variable
   SMTP_Message message;
@@ -166,7 +152,8 @@ void sendAlert(String subject, String body) {
   message.addRecipient("Recipient", recipient_email);
 
   // Set the message content
-  message.text.content = body;
+  String messageBody = body + "\n" + "Date & Time: " + getFormattedDateTime();
+  message.text.content = messageBody;
 
   // Set debug option
   smtp.debug(1);
@@ -190,26 +177,24 @@ void sendAlert(String subject, String body) {
   smtp.closeSession();
 }
 
-// SMTP callback function
+// Function to get the formatted current date and time
+String getFormattedDateTime() {
+  struct tm timeinfo;
+  if (!getLocalTime(&timeinfo)) {
+    return "Failed to obtain time";
+  }
+  char buffer[30];
+  strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M:%S", &timeinfo);
+  return String(buffer);
+}
+
+// Function to handle the SMTP callback
 void smtpCallback(SMTP_Status status) {
   // Print the status of the email sending process
   Serial.println(status.info());
 
   if (status.success()) {
     Serial.println("Email sent successfully.");
-  }
-}
-
-// Function to check the battery voltage
-void checkBattery() {
-  // Read raw ADC value and convert it to voltage
-  float adcValue = analogRead(BATTERY_PIN);
-  batteryVoltage = adcValue * (3.3 / 4095.0) / voltageDividerRatio; // Adjust for voltage divider ratio
-
-  Serial.println("Battery Voltage: " + String(batteryVoltage, 2) + "V");
-
-  if (batteryVoltage < voltageThreshold) {
-    Serial.println("WARNING: Battery voltage is low!");
   }
 }
 
@@ -233,14 +218,18 @@ bool connectToWiFi() {
   }
 }
 
-// Function to read the capacitive touch sensor and average readings
-float readTouchSensor() {
-  float total = 0.0;
-  for (int i = 0; i < numReadings; ++i) {
-    total += touchRead(touchPin);
-    delay(10); // Short delay between readings
+// Function to print the local time
+void printLocalTime(String& timeStr, String& dateStr) {
+  struct tm timeinfo;
+  if (!getLocalTime(&timeinfo)) {
+    Serial.println("Failed to obtain time");
+    return;
   }
-  float average = total / numReadings;
-  return average;
+  char timeBuffer[10];
+  char dateBuffer[11];
+  strftime(timeBuffer, sizeof(timeBuffer), "%I:%M %p", &timeinfo);
+  strftime(dateBuffer, sizeof(dateBuffer), "%m/%d/%Y", &timeinfo);
+  timeStr = String(timeBuffer);
+  dateStr = String(dateBuffer);
 }
 
